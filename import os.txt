@@ -1,0 +1,233 @@
+import os
+import json
+import datetime
+import subprocess
+import requests
+import google.generativeai as genai
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
+)
+from telegram.request import HTTPXRequest
+
+BOT_TOKEN = "8566709518:AAEKMcyuSkzG1pA3u8N5uaKoVQi-LK0GfBk"
+ALLOWED_USER_ID = 8046833336
+
+# ---------- AI Models Settings ----------
+OLLAMA_URL = "http://localhost:11434/api/generate"
+FAST_LOCAL_MODEL = "qwen2.5:0.5b"       # রাউটিং ও ছোট প্রশ্নের জন্য
+HEAVY_LOCAL_MODEL = "gemma4:e4b"        # হেভি অফলাইন ফলব্যাকের জন্য
+DAILY_API_LIMIT = 15
+TRACKER_FILE = "api_usage_tracker.json"
+
+# ---------- Excel Settings ----------
+EXCEL_EXE_PATH = r"C:\Users\sarmi\OneDrive\Desktop\TelegramBot\AI_Excel_Architect.exe"
+EXCEL_EXE_DIR = os.path.dirname(EXCEL_EXE_PATH)
+GENERATED_EXTENSIONS = (".xlsx", ".docx", ".html")
+
+# ---------- Gemini Setup ----------
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-3.6-flash') # লেটেস্ট ফাস্ট মডেল
+
+def is_authorized(update: Update) -> bool:
+    user = update.effective_user
+    return user is not None and user.id == ALLOWED_USER_ID
+
+# ======================================================================
+# QUOTA & CACHE TRACKER
+# ======================================================================
+def get_api_quota_status() -> bool:
+    today = str(datetime.date.today())
+    data = {"date": today, "count": 0, "cache": {}}
+    if os.path.exists(TRACKER_FILE):
+        try:
+            with open(TRACKER_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    if data.get("date") != today:
+        data = {"date": today, "count": 0, "cache": data.get("cache", {})}
+    with open(TRACKER_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    return data["count"] < DAILY_API_LIMIT
+
+def increment_api_quota(prompt: str, response_text: str):
+    today = str(datetime.date.today())
+    data = {"date": today, "count": 0, "cache": {}}
+    if os.path.exists(TRACKER_FILE):
+        try:
+            with open(TRACKER_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    data["count"] = data.get("count", 0) + 1
+    data.setdefault("cache", {})[prompt.strip().lower()] = response_text
+    with open(TRACKER_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+def get_cached_response(prompt: str):
+    if os.path.exists(TRACKER_FILE):
+        try:
+            with open(TRACKER_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("cache", {}).get(prompt.strip().lower())
+        except Exception:
+            pass
+    return None
+
+# ======================================================================
+# LOCAL AI HELPERS
+# ======================================================================
+def query_ollama(prompt: str, model: str = FAST_LOCAL_MODEL, timeout: int = 60):
+    try:
+        resp = requests.post(
+            OLLAMA_URL,
+            json={"model": model, "prompt": prompt, "stream": False, "keep_alive": 0},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "").strip() or None
+    except Exception:
+        return None
+
+def classify_intent(text: str) -> str:
+    classifier_prompt = (
+        "Classify the following user message into exactly ONE category: EXCEL, COMPLEX, or CHAT.\n"
+        "- EXCEL: user asks to make spreadsheet, excel, doc, table, or tracker.\n"
+        "- COMPLEX: advanced coding, deep reasoning, logic, architecture, code generation.\n"
+        "- CHAT: greetings, casual talk, simple short questions.\n"
+        f"Message: \"{text}\"\nOutput category ONLY:"
+    )
+    res = query_ollama(classifier_prompt, model=FAST_LOCAL_MODEL, timeout=10)
+    if res:
+        res_upper = res.upper()
+        if "EXCEL" in res_upper: return "EXCEL"
+        if "COMPLEX" in res_upper: return "COMPLEX"
+    return "CHAT"
+
+def run_excel_exe(prompt: str):
+    if not os.path.isdir(EXCEL_EXE_DIR):
+        return False, None, f"exe-r folder pawa jayni: {EXCEL_EXE_DIR}"
+    before = {f: os.path.getmtime(os.path.join(EXCEL_EXE_DIR, f)) 
+              for f in os.listdir(EXCEL_EXE_DIR) if f.lower().endswith(GENERATED_EXTENSIONS)}
+    try:
+        result = subprocess.run([EXCEL_EXE_PATH, prompt], capture_output=True, text=True, timeout=300, cwd=EXCEL_EXE_DIR)
+        if result.returncode != 0:
+            return False, None, (result.stderr or "Unknown error").strip()[:1000]
+    except Exception as e:
+        return False, None, str(e)
+
+    newest_file, newest_time = None, 0
+    for f in os.listdir(EXCEL_EXE_DIR):
+        if not f.lower().endswith(GENERATED_EXTENSIONS): continue
+        path = os.path.join(EXCEL_EXE_DIR, f)
+        mtime = os.path.getmtime(path)
+        if mtime > before.get(f, 0) and mtime > newest_time:
+            newest_time, newest_file = mtime, path
+    return (True, newest_file, None) if newest_file else (False, None, "File not found")
+
+# ======================================================================
+# HANDLERS
+# ======================================================================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    await update.message.reply_text("হাইব্রিড রাউটার অনলাইন! 🚀")
+
+async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    command = " ".join(context.args)
+    if not command:
+        await update.message.reply_text("কমান্ড লেখো, যেমন: /cmd dir")
+        return
+    try:
+        output = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT, text=True)
+        await update.message.reply_text(f"```\n{output[:4000] or 'Success'}\n```", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"ত্রুটি:\n{str(e)}")
+
+async def lock_pc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    subprocess.run("rundll32.exe user32.dll,LockWorkStation", shell=True)
+    await update.message.reply_text("ল্যাপটপ লক করা হয়েছে 🔒")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update): return
+    text = update.message.text
+    
+    # 1. চেক ক্যাশ
+    cached = get_cached_response(text)
+    if cached:
+        await update.message.reply_text(f"💾 [Cached Result]\n{cached}")
+        return
+
+    # 2. ইনটেন্ট রাউটিং (0.5b দিয়ে)
+    intent = classify_intent(text)
+
+    if intent == "EXCEL":
+        await update.message.reply_text("📊 Antigravity এক্সেল বানাচ্ছে...")
+        success, filepath, error = run_excel_exe(text)
+        if success:
+            context.user_data["pending_file"] = filepath
+            filename = os.path.basename(filepath)
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ হ্যাঁ, পাঠাও", callback_data="send_file"),
+                InlineKeyboardButton("❌ না", callback_data="cancel_file"),
+            ]])
+            await update.message.reply_text(f"✅ ফাইল রেডি: {filename}\nপাঠাবো?", reply_markup=keyboard)
+        else:
+            await update.message.reply_text(f"❌ এক্সেল বানাতে সমস্যা: {error}")
+        return
+
+    elif intent == "COMPLEX":
+        if get_api_quota_status() and GEMINI_API_KEY:
+            await update.message.reply_text("🌐 Gemini ভাবছে...")
+            try:
+                gemini_res = gemini_model.generate_content(text)
+                reply_text = gemini_res.text
+                increment_api_quota(text, reply_text)
+                await update.message.reply_text(f"🌐 [Gemini AI]\n{reply_text[:4000]}")
+                return
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ API Error: {e}। লোকাল হেভি মডেলে যাচ্ছে...")
+        else:
+            await update.message.reply_text("⚠️ API কোটা শেষ বা কী নেই! লোকাল হেভি এআই-এ (gemma) যাচ্ছে (সময় লাগতে পারে)... ⏳")
+        
+        # Fallback to Heavy Local
+        heavy_res = query_ollama(text, model=HEAVY_LOCAL_MODEL, timeout=300)
+        await update.message.reply_text(heavy_res[:4000] if heavy_res else "লোকাল হেভি এআই রেসপন্স দেয়নি।")
+        return
+
+    else:
+        # CHAT (Fast Local 0.5b)
+        reply = query_ollama(text, model=FAST_LOCAL_MODEL, timeout=30)
+        await update.message.reply_text(reply[:4000] if reply else "লোকাল এআই কানেক্ট করা যায়নি।")
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id != ALLOWED_USER_ID: return
+    await query.answer()
+    if query.data == "send_file":
+        filepath = context.user_data.get("pending_file")
+        if filepath and os.path.exists(filepath):
+            with open(filepath, "rb") as f:
+                await query.message.reply_document(document=f)
+        context.user_data.pop("pending_file", None)
+    elif query.data == "cancel_file":
+        await query.message.reply_text("বাতিল করা হলো।")
+        context.user_data.pop("pending_file", None)
+
+if __name__ == '__main__':
+    custom_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0, pool_timeout=30.0)
+    app = ApplicationBuilder().token(BOT_TOKEN).request(custom_request).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cmd", run_cmd))
+    app.add_handler(CommandHandler("lock", lock_pc))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    print("হাইব্রিড রাউটার বট সফলভাবে চালু হয়েছে! 💻⚡")
+    app.run_polling(bootstrap_retries=5)

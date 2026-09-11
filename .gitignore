@@ -1,0 +1,34 @@
+# Environment & Secrets
+.env
+*.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Persistent Tracker & Caches
+api_usage_tracker.json
+gemini_cache.json
+
+# Audio & Temporary files
+*.mp3
+*.wav
+*.ogg
+*.oga
+voice_*.mp3
+test_*.mp3
+test_*.wav
+
+# System & OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
