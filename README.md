@@ -259,28 +259,73 @@ The RAG engine analyzes queries and targets the user's specific Obsidian folder 
 
 ---
 
-## 🛠️ 8. Maintenance, Testing & Controls
+---
 
-* **Run Comprehensive Test Suite (15 Read & Security Tests):**
+## 🔁 9. Iterative Answer Verification & Self-Improvement System
+
+Instead of relying on a single raw search pass, queries to the Obsidian Vault undergo an iterative verification pipeline:
+
+```
+Telegram Question
+       ↓
+Temporal & Intent Preprocessing (e.g. 'kal' → 'Monday 2026-09-21')
+       ↓
+Retrieval Memory Check (Prioritize previously successful notes)
+       ↓
+┌────────────────────────────────────────────────────────┐
+│ Iterative Verification Loop (1 to 5 cycles)            │
+│                                                        │
+│ 1. Search & Context Assembly                           │
+│      ↓                                                 │
+│ 2. Draft Answer Generation via Local Ollama            │
+│      ↓                                                 │
+│ 3. Answer Verification & Factual Grounding Check       │
+│      ↓                                                 │
+│ 4. Contradiction Detection across notes                │
+│      ↓                                                 │
+│ 5. Sufficient? (Confidence ≥ 0.80 & No Contradictions) │
+│      ├─ YES ──→ Early Stop! Return Answer              │
+│      └─ NO  ──→ Expand Query & Traverse Wikilinks      │
+│                 Repeat up to 5 iterations              │
+└────────────────────────────────────────────────────────┘
+       ↓
+Final Verified Answer with Verification Badge & Sources
+       ↓
+User Feedback Buttons: [ 👍 সঠিক ]  [ 👎 ভুল/অসম্পূর্ণ ]
+       ↓
+Local Retrieval Learning Memory (`retrieval_memory.json`)
+```
+
+### Self-Improvement Features:
+1. **Adaptive Early Stopping:** Direct, unambiguous queries complete in 1–2 iterations with confidence $\ge 0.80$, saving local compute.
+2. **Temporal Resolution (`verifier.py`):** Automatically maps relative date phrases like *"kal"*, *"kalke"*, *"কাল"*, *"আজকে"* to specific calendar dates and weekdays before searching timetables.
+3. **Retrieval Memory (`retrieval_memory.py`):** Learns from query outcomes and user ratings without modifying model weights or vault files.
+4. **Contradiction Detection:** Alerts when multiple notes report conflicting classroom numbers, superseded versions, or contradictory schedules.
+
+---
+
+## 🛠️ 10. Maintenance, Testing & Controls
+
+* **Run Iterative Verification Test Suite (17 Tests):**
+  ```powershell
+  cd C:\TelegramBot
+  python test_iterative_verification.py
+  ```
+* **Run Regression & Security Test Suite (15 Tests):**
   ```powershell
   cd C:\TelegramBot
   python test_vault_assistant.py
   ```
-* **Start Gateway Manually (Standalone):**
+* **Inspect Local Retrieval Memory:**
   ```powershell
-  cd C:\TelegramBot
-  python gateway_api.py
+  curl http://127.0.0.1:8765/api/vault/memory_stats
   ```
 * **Start Bot in Background (Silent Auto-Start):**
   ```powershell
   wscript.exe "C:\TelegramBot\RunBot.vbs"
   ```
-* **Run Bot in Foreground (Live Logs):**
-  ```powershell
-  cd C:\TelegramBot
-  python bot_server.py
-  ```
 * **Verify Health via Gateway API:**
   ```powershell
   curl http://127.0.0.1:8765/health
   ```
+

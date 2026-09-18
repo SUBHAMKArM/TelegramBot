@@ -51,6 +51,8 @@ from gateway_api import (
 )
 GATEWAY_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/api/vault/query"
 GATEWAY_STATS_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/api/vault/stats"
+GATEWAY_FEEDBACK_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/api/vault/feedback"
+GATEWAY_MEMORY_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/api/vault/memory_stats"
 
 # ---------- OpenWeather Setup ----------
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
@@ -439,7 +441,7 @@ async def vault_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_user_query(update, context, query, reply_as_voice=False)
 
 async def vault_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetches read-only summary statistics from the local gateway."""
+    """Fetches read-only summary statistics and retrieval memory metrics from the local gateway."""
     if not is_authorized(update):
         if update.message:
             await update.message.reply_text("⛔ Unauthorized access.")
@@ -450,11 +452,29 @@ async def vault_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if res.status_code == 200:
             data = res.json()
             domain_lines = "\n".join(f"  • {k}: {v} notes" for k, v in data.get("domains", {}).items())
+            
+            # Fetch retrieval memory stats
+            mem_info = ""
+            try:
+                mres = requests.get(GATEWAY_MEMORY_URL, timeout=3)
+                if mres.status_code == 200:
+                    mdata = mres.json()
+                    mem_info = (
+                        f"\n\n🧠 **Retrieval Memory:**\n"
+                        f"  • Tracked Queries: {mdata.get('total_queries', 0)}\n"
+                        f"  • Boosted Sources: {mdata.get('boosted_sources_count', 0)}\n"
+                        f"  • Demoted Sources: {mdata.get('demoted_sources_count', 0)}\n"
+                        f"  • Feedback: 👍 {mdata.get('positive_feedback', 0)} | 👎 {mdata.get('negative_feedback', 0)}"
+                    )
+            except Exception:
+                pass
+
             msg = (
                 f"📚 **Obsidian Vault Statistics (Strict Read-Only)**\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📁 মোট নোটস: {data.get('total_notes', 0)} টি\n"
-                f"📂 ডোমেইন ব্রেকডাউন:\n{domain_lines}\n\n"
+                f"📂 ডোমেইন ব্রেকডাউন:\n{domain_lines}"
+                f"{mem_info}\n\n"
                 f"🔒 **নিরাপত্তা:** STRICT READ-ONLY\n"
                 f"🚫 ফাইল তৈরি, পরিবর্তন বা মুছে ফেলা সম্পূর্ণ নিষ্ক্রিয়।"
             )
@@ -523,7 +543,7 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     elif intent == "VAULT":
         ensure_gateway_running()
-        status_msg = await update.message.reply_text("🔍 Obsidian ভল্টে খোঁজা হচ্ছে ও লোকাল AI ভাবছে... 🧠")
+        status_msg = await update.message.reply_text("🔍 Obsidian ভল্টে খোঁজা হচ্ছে ও লোকাল AI যাচাই করছে... 🧠")
         try:
             user_id = update.effective_user.id if update.effective_user else ALLOWED_USER_ID
             res = requests.post(
@@ -531,13 +551,41 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 json={"query": text, "telegram_user_id": user_id},
                 timeout=120
             )
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
             if res.status_code == 200:
                 data = res.json()
                 answer = data.get("answer", "I couldn't find enough information in the Obsidian vault.")
-                await reply_text_and_voice(update, answer, reply_as_voice=reply_as_voice)
+                sources = data.get("sources", [])
+
+                # Feedback keyboard if answer came from vault & not a safety refusal
+                keyboard = None
+                if not data.get("refused") and data.get("has_context"):
+                    context.user_data["last_vault_query"] = {
+                        "query": text,
+                        "sources": sources
+                    }
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("👍 সঠিক", callback_data="fb_pos"),
+                        InlineKeyboardButton("👎 ভুল/অসম্পূর্ণ", callback_data="fb_neg")
+                    ]])
+
+                if reply_as_voice:
+                    await reply_text_and_voice(update, answer, reply_as_voice=True)
+                    if keyboard:
+                        await update.message.reply_text("রেসপন্সটি কি সঠিক ও সহায়ক ছিল?", reply_markup=keyboard)
+                else:
+                    await update.message.reply_text(answer[:4000], reply_markup=keyboard)
             else:
                 await reply_text_and_voice(update, f"⚠️ ভল্ট গেটওয়ে ত্রুটি (HTTP {res.status_code})", reply_as_voice=reply_as_voice)
         except Exception as e:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
             await reply_text_and_voice(update, f"⚠️ ভল্ট গেটওয়ে কানেকশন ত্রুটি: {e}", reply_as_voice=reply_as_voice)
         return
 
@@ -690,6 +738,38 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "cancel_file":
         await query.message.reply_text("বাতিল করা হলো।")
         context.user_data.pop("pending_file", None)
+    elif query.data == "fb_pos":
+        last_q = context.user_data.get("last_vault_query")
+        if last_q:
+            try:
+                requests.post(GATEWAY_FEEDBACK_URL, json={
+                    "query": last_q["query"],
+                    "sources": last_q["sources"],
+                    "is_positive": True
+                }, timeout=5)
+            except Exception as e:
+                print(f"Feedback error: {e}")
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("🙏 ধন্যবাদ! ফিডব্যাক লোকাল মেমরিতে রেকর্ড করা হয়েছে (এই নোটগুলো অগ্রাধিকার পাবে)।")
+            context.user_data.pop("last_vault_query", None)
+        else:
+            await query.edit_message_reply_markup(reply_markup=None)
+    elif query.data == "fb_neg":
+        last_q = context.user_data.get("last_vault_query")
+        if last_q:
+            try:
+                requests.post(GATEWAY_FEEDBACK_URL, json={
+                    "query": last_q["query"],
+                    "sources": last_q["sources"],
+                    "is_positive": False
+                }, timeout=5)
+            except Exception as e:
+                print(f"Feedback error: {e}")
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("⚠️ ফিডব্যাক রেকর্ড করা হয়েছে (ভুল/অসম্পূর্ণ)। পরবর্তী অনুসন্ধানে বিকল্প ও সম্পর্কিত নোট বিবেচনা করা হবে।")
+            context.user_data.pop("last_vault_query", None)
+        else:
+            await query.edit_message_reply_markup(reply_markup=None)
 
 async def cache_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """

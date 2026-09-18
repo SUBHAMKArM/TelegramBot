@@ -1,0 +1,77 @@
+{
+  "version": "1.0.0",
+  "last_updated": 1789764532.9063382,
+  "query_mappings": {
+    "rag": {
+      "query_sample": "What is RAG?",
+      "successful_sources": [
+        "RAG.md",
+        "Vector Database.md",
+        "Embeddings.md"
+      ],
+      "hits": 2,
+      "positive_feedback": 0,
+      "negative_feedback": 0,
+      "avg_iterations": 1
+    },
+    "test query feedback": {
+      "query_sample": "test query feedback",
+      "successful_sources": [
+        "AI/Test.md"
+      ],
+      "hits": 1,
+      "positive_feedback": 4,
+      "negative_feedback": 0,
+      "avg_iterations": 1
+    },
+    "rag retrieval augmented generation": {
+      "query_sample": "What is RAG retrieval augmented generation?",
+      "successful_sources": [
+        "RAG.md",
+        "Vector Database.md",
+        "Embeddings.md"
+      ],
+      "hits": 4,
+      "positive_feedback": 0,
+      "negative_feedback": 0,
+      "avg_iterations": 1
+    },
+    "rag machine learning": {
+      "query_sample": "What is RAG in machine learning?",
+      "successful_sources": [
+        "Deep Learning.md",
+        "Machine Learning.md",
+        "Artificial intelligence.md",
+        "RAG.md",
+        "Embeddings.md",
+        "Vector Database.md"
+      ],
+      "hits": 1,
+      "positive_feedback": 0,
+      "negative_feedback": 0,
+      "avg_iterations": 2
+    }
+  },
+  "failed_queries": {
+    "secret recipe quantum flying cars": {
+      "query_sample": "What is the secret recipe for quantum flying cars?",
+      "attempts": [
+        "What is the secret recipe for quantum flying cars?",
+        "AI_RETRIEVAL",
+        "Deep Learning",
+        "Machine Learning",
+        "Neural Networks"
+      ],
+      "last_failed": 1789764483.149939
+    }
+  },
+  "source_boosts": {
+    "RAG.md": 7,
+    "Vector Database.md": 7,
+    "Embeddings.md": 7,
+    "AI/Test.md": 8,
+    "Deep Learning.md": 1,
+    "Machine Learning.md": 1,
+    "Artificial intelligence.md": 1
+  }
+}

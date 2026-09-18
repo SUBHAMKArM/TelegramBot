@@ -130,10 +130,17 @@ def health_check():
     }
 
 
+class FeedbackRequest(BaseModel):
+    query: str
+    sources: List[str] = []
+    is_positive: bool
+
+
 @app.post("/api/vault/query")
 def query_vault(req: QueryRequest):
     """
-    Performs targeted search, context extraction, and local Ollama reasoning.
+    Performs iterative targeted search, draft generation, evidence checking,
+    contradiction detection, and early stopping via local Ollama.
     Firmly rejects destructive or modification commands.
     """
     start_time = time.time()
@@ -149,75 +156,54 @@ def query_vault(req: QueryRequest):
             "answer": COMMAND_SAFETY_REFUSAL,
             "sources": [],
             "domain": "SAFETY_GUARD",
-            "has_context": False
-        }
-
-    # 2. Targeted RAG Retrieval
-    retrieval = vault_rag.retrieve_context(query_text)
-    
-    # Grounding Invariant: If no relevant information found in vault, do not hallucinate
-    if not retrieval["has_context"]:
-        elapsed = round(time.time() - start_time, 2)
-        logger.info(f"{user_id_str} | Query: '{query_text[:50]}' | NO_CONTEXT_FOUND | Duration: {elapsed}s")
-        return {
-            "success": True,
-            "refused": False,
-            "answer": "I couldn't find enough information in the Obsidian vault.",
-            "sources": [],
-            "domain": retrieval["domain"],
             "has_context": False,
-            "duration_seconds": elapsed
+            "iterations": 0,
+            "confidence": 0.0,
+            "verification_status": "Refused (Write Attempt)"
         }
 
-    # 3. Build Prompt for Local Ollama
+    # 2. Iterative RAG Pipeline (1 to 5 cycles with early stop)
     model_to_use = req.model or DEFAULT_OLLAMA_MODEL
-    prompt = vault_rag.build_ollama_prompt(query_text, retrieval)
-
-    # 4. Local Ollama Generation (Zero Tools, Isolated)
-    ollama_response = call_ollama(prompt, model=model_to_use)
-    elapsed = round(time.time() - start_time, 2)
-
-    if not ollama_response:
-        logger.error(f"{user_id_str} | Query: '{query_text[:50]}' | OLLAMA_FAILED | Duration: {elapsed}s")
-        # Graceful fallback if Ollama is unreachable
-        if retrieval["has_context"]:
-            fallback_ans = (
-                "⚠️ Local Ollama is temporarily unavailable. Here are the relevant notes found in your vault:\n\n"
-                + "\n".join(f"• {s}" for s in retrieval["source_notes"])
-            )
-        else:
-            fallback_ans = "I couldn't find enough information in the Obsidian vault."
-
-        return {
-            "success": False,
-            "refused": False,
-            "answer": fallback_ans,
-            "sources": retrieval["source_notes"],
-            "domain": retrieval["domain"],
-            "has_context": retrieval["has_context"]
-        }
-
-    # 5. Log Query Safely (Without Logging Sensitive Vault Text)
-    logger.info(
-        f"{user_id_str} | Query: '{query_text[:50]}' | Domain: {retrieval['domain']} | "
-        f"Sources: {len(retrieval['source_notes'])} | Model: {model_to_use} | Duration: {elapsed}s"
+    result = vault_rag.iterative_rag_query(
+        query=query_text,
+        ollama_caller=call_ollama,
+        model=model_to_use,
+        max_iterations=5
     )
 
-    # Ensure sources are listed if not already present in the Ollama response
-    final_answer = ollama_response
-    if retrieval["source_notes"] and "Sources:" not in final_answer:
-        sources_str = "\n".join(f"- {s}" for s in retrieval["source_notes"])
-        final_answer += f"\n\nSources:\n{sources_str}"
+    elapsed = result.get("duration_seconds", round(time.time() - start_time, 2))
+    logger.info(
+        f"{user_id_str} | Query: '{query_text[:50]}' | Domain: {result['domain']} | "
+        f"Sources: {len(result['sources'])} | Iterations: {result['iterations']} | "
+        f"Conf: {result['confidence']} | Duration: {elapsed}s"
+    )
 
+    result["refused"] = False
+    return result
+
+
+@app.post("/api/vault/feedback")
+def record_feedback(req: FeedbackRequest):
+    """
+    Records user feedback (👍 / 👎) into local retrieval memory.
+    Zero modification to Obsidian vault or Ollama weights.
+    """
+    updated = vault_rag.memory.record_feedback(
+        query=req.query,
+        sources=req.sources,
+        is_positive=req.is_positive
+    )
     return {
         "success": True,
-        "refused": False,
-        "answer": final_answer,
-        "sources": retrieval["source_notes"],
-        "domain": retrieval["domain"],
-        "has_context": retrieval["has_context"],
-        "duration_seconds": elapsed
+        "updated": updated,
+        "memory_stats": vault_rag.memory.get_stats()
     }
+
+
+@app.get("/api/vault/memory_stats")
+def retrieval_memory_stats():
+    """Returns statistics from the local retrieval learning memory."""
+    return vault_rag.memory.get_stats()
 
 
 @app.post("/api/vault/search")

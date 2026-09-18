@@ -8,8 +8,12 @@ All operations are local and strictly read-only.
 
 import os
 import re
-from typing import List, Dict, Any, Optional, Tuple
+import time
+from typing import List, Dict, Any, Optional, Tuple, Callable
+
 from obsidian_vault_reader import ObsidianVaultReader
+from retrieval_memory import RetrievalMemory
+from verifier import TemporalContextResolver, AnswerVerifier
 
 # Domain Mapping based on Obsidian Vault Architecture
 DOMAINS = {
@@ -58,8 +62,9 @@ class VaultRAG:
     Performs query analysis, domain routing, and context extraction.
     """
 
-    def __init__(self, reader: Optional[ObsidianVaultReader] = None):
+    def __init__(self, reader: Optional[ObsidianVaultReader] = None, memory: Optional[RetrievalMemory] = None):
         self.reader = reader or ObsidianVaultReader()
+        self.memory = memory or RetrievalMemory()
 
     def analyze_query(self, query: str) -> Dict[str, Any]:
         """
@@ -103,6 +108,10 @@ class VaultRAG:
                 "project": project_score
             }
         }
+
+    def classify_vault_domain(self, query: str) -> str:
+        """Returns the detected vault domain name for the given query."""
+        return self.analyze_query(query)["primary_domain"]
 
     def _extract_relevant_section(self, content: str, query: str, max_chars: int = 1200) -> str:
         """
@@ -272,3 +281,241 @@ class VaultRAG:
             "Assistant Answer:"
         )
         return prompt
+
+    def generate_alternative_queries(
+        self,
+        original_query: str,
+        domain: str = None,
+        retrieved_source_notes: List[str] = None,
+        temporal_info: Dict[str, Any] = None,
+        iteration: int = 1,
+        **kwargs
+    ) -> List[str]:
+        """
+        Generates alternative queries using temporal context, vault domain hierarchy,
+        synonyms, and linked notes traversal.
+        """
+        alternatives = []
+        q_lower = original_query.lower()
+
+        if domain is None:
+            domain = self.classify_vault_domain(original_query)
+        if retrieved_source_notes is None:
+            retrieved_source_notes = []
+        if temporal_info is None:
+            temporal_info = TemporalContextResolver.resolve_temporal_query(original_query)
+
+        # 1. Temporal alternative queries
+        resolved_day = temporal_info.get("resolved_day")
+        if resolved_day:
+            alternatives.append(f"{resolved_day} timetable BCA 1B")
+            alternatives.append(f"{resolved_day} class routine")
+            alternatives.append(f"Detailed Daily Breakdown {resolved_day}")
+
+        # 2. Domain-specific expansion
+        if domain in ("COLLEGE", "COLLEGE_TIMETABLE"):
+            alternatives.extend([
+                "2026 Odd Semester BCA 1B",
+                "Class Timetable BCA 1B",
+                "Master Timetable Matrix",
+                "College Map"
+            ])
+        elif domain == "AI_KNOWLEDGE":
+            # Expand AI terms with related concept notes
+            for topic in ["rag", "llm", "embeddings", "vector database", "transformer", "neural network", "deep learning"]:
+                if topic in q_lower:
+                    alternatives.append(f"{topic.upper()} concept")
+                    alternatives.append(f"Related {topic}")
+        elif domain == "PROJECTS":
+            alternatives.append("Antigravity Projects Memory")
+            alternatives.append("Projects Map")
+
+        # 3. Traversal of linked notes ([[wikilinks]]) from discovered sources
+        for note_file in retrieved_source_notes[:2]:
+            note_matches = self.reader.search_files(note_file)
+            if note_matches:
+                rel = note_matches[0]["relative_path"]
+                try:
+                    links = self.reader.get_links(rel)
+                    for wl in links.get("outgoing_wikilinks", [])[:3]:
+                        if len(wl) > 3 and wl.lower() not in [a.lower() for a in alternatives]:
+                            alternatives.append(wl)
+                except Exception:
+                    pass
+
+        # Return unique alternatives excluding the exact original query
+        seen = {original_query.strip().lower()}
+        clean_alts = []
+        for a in alternatives:
+            clean_a = a.strip()
+            if clean_a.lower() not in seen:
+                seen.add(clean_a.lower())
+                clean_alts.append(clean_a)
+        return clean_alts[:5]
+
+    def iterative_rag_query(
+        self,
+        query: str,
+        ollama_caller: Callable[[str, str], Optional[str]],
+        model: str = "qwen2.5:1.5b",
+        max_iterations: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Executes the iterative local verification loop:
+        Search -> Draft -> Evidence Check -> Contradiction Check -> Decision -> (Query Expansion & Re-verify)
+        Stops early (1-2 iterations) if sufficient evidence is established (NO BLIND LOOPING).
+        """
+        start_time = time.time()
+
+        # Step 0: Resolve temporal context
+        temp_info = TemporalContextResolver.resolve_temporal_query(query)
+        effective_query = temp_info["expanded_query"]
+
+        # Step 1: Check retrieval memory for previously verified sources
+        prioritized_sources = self.memory.get_prioritized_sources(query)
+
+        attempted_queries = [effective_query]
+        accumulated_sources: List[str] = []
+        best_draft = ""
+        best_retrieval: Optional[Dict[str, Any]] = None
+        best_confidence = 0.0
+        final_contradictions: List[str] = []
+        iteration_count = 0
+        seen_contexts = set()
+
+        for it in range(1, max_iterations + 1):
+            iteration_count = it
+            curr_q = attempted_queries[-1]
+
+            # 1. Targeted Search
+            retrieval = self.retrieve_context(curr_q)
+
+            # Memory Boost: inject previously confirmed high-confidence sources
+            if prioritized_sources and it == 1:
+                for ps in prioritized_sources:
+                    if ps not in retrieval["source_notes"]:
+                        try:
+                            found = self.reader.search_files(ps)
+                            if found:
+                                rel_p = found[0]["relative_path"]
+                                raw_c = self.reader.read_file(rel_p)
+                                sec = self._extract_relevant_section(raw_c, effective_query, max_chars=800)
+                                chunk = f"### [Source (Memory Boosted): {ps}] ({rel_p})\n{sec}"
+                                retrieval["context_text"] = f"{chunk}\n\n{retrieval['context_text']}".strip()
+                                retrieval["source_notes"].insert(0, ps)
+                                retrieval["has_context"] = True
+                        except Exception:
+                            pass
+
+            if not retrieval["has_context"]:
+                # If first search returned no notes, attempt query expansion before giving up
+                if it < max_iterations:
+                    alts = self.generate_alternative_queries(
+                        query, retrieval.get("domain", "GENERAL"), [], temp_info
+                    )
+                    next_q = next((a for a in alts if a not in attempted_queries), None)
+                    if next_q:
+                        attempted_queries.append(next_q)
+                        continue
+
+                # Truly nothing found
+                self.memory.record_retrieval_failure(query, attempted_queries)
+                return {
+                    "success": True,
+                    "answer": "I couldn't find enough information in the Obsidian vault.",
+                    "sources": [],
+                    "iterations": iteration_count,
+                    "confidence": 0.0,
+                    "verification_status": "⚠️ Could not verify (no relevant notes in vault)",
+                    "has_context": False,
+                    "domain": retrieval.get("domain", "GENERAL"),
+                    "contradictions": [],
+                    "duration_seconds": round(time.time() - start_time, 2)
+                }
+
+            # Avoid re-processing identical context (no blind looping)
+            context_hash = hash(retrieval["context_text"])
+            if context_hash in seen_contexts and it > 1:
+                break
+            seen_contexts.add(context_hash)
+
+            best_retrieval = retrieval
+            for s in retrieval["source_notes"]:
+                if s not in accumulated_sources:
+                    accumulated_sources.append(s)
+
+            # 2. Draft Answer Generation via Local Ollama
+            prompt = self.build_ollama_prompt(query, retrieval)
+            draft = ollama_caller(prompt, model=model) or ""
+
+            # 3. Evidence & Contradiction Check
+            v = AnswerVerifier.verify_draft(
+                effective_query, draft, retrieval["context_text"], retrieval["source_notes"]
+            )
+            confidence = v["confidence"]
+            contradictions = v["contradictions"]
+            if contradictions:
+                for c in contradictions:
+                    if c not in final_contradictions:
+                        final_contradictions.append(c)
+
+            best_draft = draft
+            best_confidence = max(best_confidence, confidence)
+
+            # 4. DECISION: Stop early if sufficient (NO BLIND LOOPING)
+            if v["is_sufficient"] or confidence >= 0.80:
+                break
+
+            # 5. Query Expansion for Next Iteration
+            if it < max_iterations:
+                alts = self.generate_alternative_queries(
+                    query, retrieval.get("domain", "GENERAL"), retrieval["source_notes"], temp_info
+                )
+                next_q = next((a for a in alts if a not in attempted_queries), None)
+                if not next_q:
+                    # No new query expansion available, stop cleanly
+                    break
+                attempted_queries.append(next_q)
+
+        # 6. Formulate Verified Final Answer
+        final_answer = best_draft or "I couldn't find enough information in the Obsidian vault."
+
+        # Add explicit contradiction warnings if detected across notes
+        if final_contradictions:
+            conflict_msg = f"\n\n⚠️ **Note Discrepancy:** {final_contradictions[0]}"
+            if conflict_msg not in final_answer:
+                final_answer += conflict_msg
+
+        # Ensure Sources are cleanly cited
+        if accumulated_sources and "Sources:" not in final_answer:
+            sources_str = "\n".join(f"- {s}" for s in accumulated_sources)
+            final_answer += f"\n\nSources:\n{sources_str}"
+
+        # Attach Verification Badge
+        if best_confidence >= 0.75 and accumulated_sources:
+            verif_badge = "Verification: ✓ Checked against local vault"
+        else:
+            verif_badge = "Verification: ⚠️ Could not fully verify from the vault."
+
+        if verif_badge not in final_answer:
+            final_answer += f"\n\n{verif_badge}"
+
+        # 7. Update Local Retrieval Memory (zero vault modification)
+        if best_confidence >= 0.70 and accumulated_sources:
+            self.memory.record_successful_retrieval(query, accumulated_sources, iteration_count)
+        else:
+            self.memory.record_retrieval_failure(query, attempted_queries)
+
+        elapsed = round(time.time() - start_time, 2)
+        return {
+            "success": True,
+            "answer": final_answer,
+            "sources": accumulated_sources,
+            "iterations": iteration_count,
+            "confidence": best_confidence,
+            "verification_status": verif_badge,
+            "has_context": True,
+            "domain": best_retrieval["domain"] if best_retrieval else "GENERAL",
+            "contradictions": final_contradictions,
+            "duration_seconds": elapsed
+        }
