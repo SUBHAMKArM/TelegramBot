@@ -22,20 +22,20 @@ try:
 except ImportError:
     pass
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8566709518:AAEKMcyuSkzG1pA3u8N5uaKoVQi-LK0GfBk")
-ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", 8046833336))
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 
 # ---------- AI Models Settings ----------
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")  # IPv4 ফিক্স
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
 FAST_LOCAL_MODEL = os.environ.get("FAST_LOCAL_MODEL", "qwen2.5:1.5b")
 HEAVY_LOCAL_MODEL = os.environ.get("HEAVY_LOCAL_MODEL", "gemma4:e4b")
-DAILY_API_LIMIT = int(os.environ.get("DAILY_API_LIMIT", 15))
+DAILY_API_LIMIT = int(os.environ.get("DAILY_API_LIMIT", "15"))
 TRACKER_FILE = "api_usage_tracker.json"
-CACHE_FILE = "gemini_cache.json"  # পার্সিস্টেন্ট API রেসপন্স ক্যাশ
+CACHE_FILE = "gemini_cache.json"
 
-# ---------- Excel Settings (New Clean Path) ----------
-EXCEL_SCRIPT_PATH = os.environ.get("EXCEL_SCRIPT_PATH", r"C:\Users\sarmi\.gemini\antigravity\scratch\ai_excel_architect\antigravity_main.py")
-EXCEL_OUTPUT_DIR = os.environ.get("EXCEL_OUTPUT_DIR", r"C:\Users\sarmi\.gemini\antigravity\scratch\ai_excel_architect\dist")
+# ---------- Excel Settings (Optional) ----------
+EXCEL_SCRIPT_PATH = os.environ.get("EXCEL_SCRIPT_PATH", "")
+EXCEL_OUTPUT_DIR = os.environ.get("EXCEL_OUTPUT_DIR", "./dist")
 GENERATED_EXTENSIONS = (".xlsx", ".docx", ".html")
 
 # ---------- Gemini Setup ----------
@@ -612,6 +612,9 @@ def ensure_ollama_running():
         print("✅ Ollama সার্ভার ব্যাকগ্রাউন্ডে চালু করা হয়েছে।")
 
 if __name__ == '__main__':
+    if not BOT_TOKEN:
+        print("❌ ERROR: BOT_TOKEN is missing! Please configure BOT_TOKEN in your .env file.")
+        exit(1)
     ensure_ollama_running()
     custom_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0, pool_timeout=30.0)
     app = ApplicationBuilder().token(BOT_TOKEN).request(custom_request).build()
