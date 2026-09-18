@@ -172,14 +172,19 @@ Secrets are isolated inside `.env` to prevent accidental exposure:
 
 ```env
 # Telegram Bot Configuration
-BOT_TOKEN=8566709518:AAEKMcyuSkzG1pA3u8N5uaKoVQi-LK0GfBk
+BOT_TOKEN=your_telegram_bot_token_here
 ALLOWED_USER_ID=8046833336
 
-# Cloud AI (Google Gemini)
-GEMINI_API_KEY=AIzaSyCVCYJ9Ab14-km9-n-XCJ7Pdw_dLmqNVIg
+# Local AI Gateway & Obsidian Configuration
+OBSIDIAN_VAULT_PATH=C:\Users\sarmi\Documents\Obsidian Vault
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=8765
+
+# Cloud AI (Google Gemini - for general non-vault tasks only)
+GEMINI_API_KEY=your_gemini_api_key_here
 
 # Weather API (OpenWeatherMap)
-OPENWEATHER_API_KEY=27056fc00603e987d24c8122e04c8b04
+OPENWEATHER_API_KEY=your_openweather_api_key_here
 
 # Local AI (Ollama)
 OLLAMA_URL=http://127.0.0.1:11434/api/generate
@@ -194,34 +199,88 @@ EXCEL_OUTPUT_DIR=C:\Users\sarmi\.gemini\antigravity\scratch\ai_excel_architect\d
 
 ---
 
-## 💬 6. Telegram Usage & Voice Guide
+## 🔒 6. Obsidian Read-Only Knowledge Assistant
+
+### 🎯 Architecture & Strict Security Boundary
+```
+Telegram Question (User: 8046833336)
+       │
+       ▼
+Command Safety Filter ──► [Destructive/Write Intent] ──► Immediate Refusal
+       │
+       ▼ [Read Query]
+Local AI Gateway (FastAPI http://127.0.0.1:8765)
+       │
+       ▼
+Targeted RAG Engine (`vault_rag.py`)
+       │
+       ▼ (Path Boundary Validation & Mode: "r" only)
+Obsidian Read-Only Adapter (`obsidian_vault_reader.py`)
+       │
+       ▼ (Smallest Sufficient Context < 2500 chars)
+Local Ollama Engine (`qwen2.5:1.5b` on http://127.0.0.1:11434)
+       │
+       ▼ (Grounded Answer + Sources)
+Telegram Response (Text + Optional Voice)
+```
+
+### 🛡️ Security Invariants
+1. **Hard Read-Only Boundary:** The adapter `obsidian_vault_reader.py` exposes *only* safe inspection methods (`read_file`, `search_files`, `search_content`, `get_metadata`, `get_links`, `read_canvas_data`, `get_file_history`, `get_file_diff`). Zero write, create, delete, move, rename, or restore methods exist.
+2. **Directory Traversal Protection:** Every path is validated with `os.path.commonpath` against the vault root and rejects any `..` patterns with `SecurityPathViolationError`.
+3. **Command Safety Interception:** If a user sends commands like `"delete this note"`, `"edit note"`, `"create file"`, or Bengali equivalents, the system strictly returns:
+   > *"I can read and search the vault, but this Telegram AI has no permission to edit or delete files."*
+4. **Zero Cloud Leakage:** All Obsidian vault content and queries are processed 100% locally via the Local Gateway and Ollama. Vault data is **never** sent to Google Gemini, OpenAI, Claude, or any third-party service.
+5. **Tool Isolation:** Ollama receives no filesystem tools or execution capabilities; it receives retrieved text exclusively as grounded context.
+6. **Localhost Binding:** The FastAPI gateway binds exclusively to `127.0.0.1:8765`.
+
+### 📂 Domain-Aware Knowledge Retrieval
+The RAG engine analyzes queries and targets the user's specific Obsidian folder structure:
+* **`01_College`**: College timetable, classes, teachers (SRB, RJR, ANS, SDM, etc.), subjects, rooms, and exams.
+* **`02_Projects` & `99_System/AI_Memory/Projects`**: Technical and software projects (NIT Attendance, AeroIntel, Victus AI, etc.).
+* **`03_Second_Brain/AI`**: Unified AI knowledge domain covering Machine Learning, Deep Learning, LLMs, Embeddings, RAG, Transformers, and Vector Databases.
+* **`04_Resources` & `05_Archive`**: References, resources, and archived material.
+
+---
+
+## 💬 7. Telegram Usage & Voice Guide
 
 | Action / Query | Example (Voice or Text) | Result |
 |---|---|---|
-| **Voice Conversation** | Send voice note: *"আজকের আবহাওয়া কেমন?"* | Bot transcribes speech, responds with text & **Voice Note back** in natural Bengali. |
-| **Hindi Voice** | Send voice note: *"आज का मौसम कैसा है?"* | Bot transcribes Hindi, replies in text & natural Hindi voice note. |
-| **English Voice** | Send voice note: *"What time is it?"* | Bot transcribes English, replies with clock and English voice note. |
-| **Live Weather** | `"Weather in Delhi"`, `"কলকাতা র আবহাওয়া"` | Queries OpenWeatherMap, summarizes temperature, humidity, wind & forecast. |
-| **Real-time Clock** | `"কটা বাজে"`, `"সময় কত"`, `"time"` | Real-time PC local clock and calendar date. |
-| **Excel Generation** | `"Make a loan calculator excel sheet"` | Generates `.xlsx` headlessly and sends file with interactive buttons. |
-| **Remote Lock** | `/lock` | Instantly locks Windows workstation (`user32.dll,LockWorkStation`). |
-| **Remote Terminal** | `/cmd dir`, `/cmd ipconfig` | Executes Windows terminal command and returns stdout. |
+| **Timetable / Classes** | *"সোমবার কি কি ক্লাস আছে?"*, *"What classes do I have on Monday?"* | Retrieves timetable from `01_College/Timetable`, lists periods, teachers, and rooms with source notes. |
+| **AI Knowledge / Second Brain** | *"RAG কী এবং এটি কীভাবে কাজ করে?"*, *"What is an Embedding?"* | Retrieves definitions from `03_Second_Brain/AI/`, explains concepts, cites source notes. |
+| **Vault Statistics** | `/vault_stats` | Displays total note counts and domain breakdown in strict read-only mode. |
+| **Explicit Vault Query** | `/vault <your question>` | Direct query to the local Obsidian AI gateway. |
+| **Destructive Command Refusal** | *"Delete Deep Learning.md"*, *"মুছে ফেলো এই ফাইলটা"* | Refuses immediately: *"I can read and search the vault, but this Telegram AI has no permission to edit or delete files."* |
+| **Voice Conversation** | Send voice note in Bengali, Hindi, or English | Transcribes speech, queries local assistant/Ollama, replies in text & natural voice. |
+| **Live Weather** | `"Weather in Kolkata"`, `"আজ বৃষ্টি হবে কি?"` | Queries OpenWeatherMap, summarizes temperature, humidity & wind. |
+| **Excel Generation** | `"Make a monthly budget excel sheet"` | Generates `.xlsx` headlessly and sends file with download buttons. |
+| **Remote PC Lock** | `/lock` | Instantly locks Windows workstation. |
 | **Inspect Cache** | `/cache`, `/cache stats`, `/cache clear` | View and manage cached API responses. |
 
 ---
 
-## 🛠️ 7. Maintenance & Manual Controls
+## 🛠️ 8. Maintenance, Testing & Controls
 
-* **Start bot in background:**
+* **Run Comprehensive Test Suite (15 Read & Security Tests):**
+  ```powershell
+  cd C:\TelegramBot
+  python test_vault_assistant.py
+  ```
+* **Start Gateway Manually (Standalone):**
+  ```powershell
+  cd C:\TelegramBot
+  python gateway_api.py
+  ```
+* **Start Bot in Background (Silent Auto-Start):**
   ```powershell
   wscript.exe "C:\TelegramBot\RunBot.vbs"
   ```
-* **Run in foreground (for live debug logs):**
+* **Run Bot in Foreground (Live Logs):**
   ```powershell
   cd C:\TelegramBot
   python bot_server.py
   ```
-* **Verify active bot process:**
+* **Verify Health via Gateway API:**
   ```powershell
-  Get-WmiObject Win32_Process -Filter "name='python.exe'" | Select-Object ProcessId, CommandLine
+  curl http://127.0.0.1:8765/health
   ```

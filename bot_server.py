@@ -44,12 +44,40 @@ gemini_client = None
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# ---------- Gateway Setup (Localhost 127.0.0.1) ----------
+from gateway_api import (
+    is_destructive_command, COMMAND_SAFETY_REFUSAL,
+    GATEWAY_HOST, GATEWAY_PORT
+)
+GATEWAY_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/api/vault/query"
+GATEWAY_STATS_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/api/vault/stats"
+
 # ---------- OpenWeather Setup ----------
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY", "")
 
 def is_authorized(update: Update) -> bool:
     user = update.effective_user
-    return user is not None and user.id == ALLOWED_USER_ID
+    if user is not None and user.id == ALLOWED_USER_ID:
+        return True
+    uid = user.id if user else "Unknown"
+    print(f"⛔ [SECURITY ALERT] Unauthorized Telegram user rejected: ID={uid}")
+    return False
+
+def ensure_gateway_running():
+    """Ensures the local FastAPI gateway is running on 127.0.0.1:8765."""
+    try:
+        r = requests.get(f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/health", timeout=1)
+        if r.status_code == 200:
+            return
+    except Exception:
+        pass
+    gateway_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateway_api.py")
+    subprocess.Popen(
+        [sys.executable, gateway_script],
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+    )
+    time.sleep(2)
+    print("✅ Local Obsidian AI Gateway চালু করা হয়েছে।")
 
 # ======================================================================
 # QUOTA TRACKER (daily API limit)
@@ -231,6 +259,10 @@ def query_ollama(prompt: str, model: str = FAST_LOCAL_MODEL, timeout: int = 60):
 def classify_intent(text: str) -> str:
     lower = text.lower().strip()
 
+    # 0. COMMAND SAFETY CHECK (Strict Read-Only Refusal)
+    if is_destructive_command(text):
+        return "COMMAND_SAFETY_REFUSAL"
+
     # 1. TIME / DATE Keywords (instant check)
     time_keywords = [
         "কটা বাজে", "কয়টা বাজে", "কয়টা বাজে", "সময় কত", "সময় কত", "time", 
@@ -257,19 +289,33 @@ def classify_intent(text: str) -> str:
     if any(k in lower for k in excel_keywords):
         return "EXCEL"
 
-    # 4. Fallback: LLM Classification for complex queries
+    # 4. OBSIDIAN VAULT / COLLEGE / SECOND BRAIN / AI KNOWLEDGE (instant check)
+    vault_keywords = [
+        "vault", "obsidian", "ভল্ট", "নোট", "নোটস", "notes", "note", "second brain",
+        "timetable", "routine", "ক্লাস", "রুটিন", "টিচার", "মাস্টার", "কলেজ", "পরীক্ষা", "exam",
+        "syllabus", "room 401", "316p", "316q", "srb", "rjr", "ans", "sdm", "nrp", "spm",
+        "mrb", "dms", "brd", "bca", "narula", "nit bca", "attendance project",
+        "rag", "retrieval", "vector database", "embeddings", "neural network",
+        "transformers", "deep learning", "machine learning", "artificial intelligence"
+    ]
+    if any(k in lower for k in vault_keywords):
+        return "VAULT"
+
+    # 5. Fallback: LLM Classification for complex queries
     classifier_prompt = (
-        "Classify the following user message into exactly ONE category: EXCEL, COMPLEX, WEATHER, TIME, or CHAT.\n"
+        "Classify the following user message into exactly ONE category: VAULT, EXCEL, WEATHER, TIME, COMPLEX, or CHAT.\n"
+        "- VAULT: user asks about personal notes, Obsidian vault, college timetable, college classes, teachers, syllabus, or AI concepts.\n"
         "- EXCEL: user asks to make spreadsheet, excel, doc, table, or tracker.\n"
-        "- COMPLEX: advanced coding, deep reasoning, logic, architecture, code generation.\n"
         "- WEATHER: user asks about weather, rain, temperature, climate.\n"
         "- TIME: user asks what time it is or what date it is.\n"
+        "- COMPLEX: advanced general coding, logic, architecture.\n"
         "- CHAT: greetings, casual talk, simple short questions.\n"
         f"Message: \"{text}\"\nOutput category ONLY:"
     )
     res = query_ollama(classifier_prompt, model=FAST_LOCAL_MODEL, timeout=10)
     if res:
         res_upper = res.upper()
+        if "VAULT" in res_upper: return "VAULT"
         if "WEATHER" in res_upper: return "WEATHER"
         if "EXCEL" in res_upper: return "EXCEL"
         if "TIME" in res_upper: return "TIME"
@@ -364,15 +410,75 @@ def fetch_weather_for_prompt(prompt: str) -> dict:
 # HANDLERS
 # ======================================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update): return
-    await update.message.reply_text("হাইব্রিড রাউটার অনলাইন! 🚀")
+    if not is_authorized(update):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized access.")
+        return
+    welcome_text = (
+        "👋 নমস্কার! হাইব্রিড এআই সহকারী অনলাইন। 🚀\n\n"
+        "🔒 **Obsidian Vault Knowledge Assistant (Strict Read-Only):**\n"
+        "• ভল্টের যেকোনো বিষয়ে প্রশ্ন করুন (রুটিন, ক্লাস, AI নোট, ইত্যাদি)।\n"
+        "• কমান্ড: `/vault <প্রশ্ন>` বা সরাসরি টেক্সট/ভয়েস পাঠান।\n"
+        "• পরিসংখ্যান: `/vault_stats`\n\n"
+        "🌤️ **ওয়েদার:** 'কলকাতা weather' বা 'বৃষ্টি হবে কি?'\n"
+        "📊 **এক্সেল:** 'excel বানাও ...'\n"
+        "🎙️ **ভয়েস সাপোর্ট:** বাংলা, হিন্দি ও ইংরেজিতে ভয়েস মেসেজ পাঠাতে পারেন।"
+    )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+
+async def vault_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct Obsidian Vault Query Command."""
+    if not is_authorized(update):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized access.")
+        return
+    query = " ".join(context.args)
+    if not query:
+        await update.message.reply_text("📖 ব্যবহার: `/vault <আপনার প্রশ্ন>`\nউদাহরণ: `/vault সোমবার কি কি ক্লাস আছে?`", parse_mode="Markdown")
+        return
+    await process_user_query(update, context, query, reply_as_voice=False)
+
+async def vault_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetches read-only summary statistics from the local gateway."""
+    if not is_authorized(update):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized access.")
+        return
+    ensure_gateway_running()
+    try:
+        res = requests.get(GATEWAY_STATS_URL, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            domain_lines = "\n".join(f"  • {k}: {v} notes" for k, v in data.get("domains", {}).items())
+            msg = (
+                f"📚 **Obsidian Vault Statistics (Strict Read-Only)**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📁 মোট নোটস: {data.get('total_notes', 0)} টি\n"
+                f"📂 ডোমেইন ব্রেকডাউন:\n{domain_lines}\n\n"
+                f"🔒 **নিরাপত্তা:** STRICT READ-ONLY\n"
+                f"🚫 ফাইল তৈরি, পরিবর্তন বা মুছে ফেলা সম্পূর্ণ নিষ্ক্রিয়।"
+            )
+            await update.message.reply_text(msg, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"⚠️ ভল্ট স্ট্যাটাস আনতে সমস্যা: HTTP {res.status_code}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ গেটওয়ে এরর: {e}")
 
 async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update): return
+    if not is_authorized(update):
+        if update.message:
+            await update.message.reply_text("⛔ Unauthorized access.")
+        return
     command = " ".join(context.args)
     if not command:
         await update.message.reply_text("কমান্ড লেখো, যেমন: /cmd dir")
         return
+    # Hard security invariant: Prohibit any shell command from touching the Obsidian vault
+    cmd_lower = command.lower()
+    if any(k in cmd_lower for k in ["obsidian", "vault"]):
+        if any(w in cmd_lower for w in ["del", "rm", "remove", "erase", "format", "ren", "move", "copy", "echo", ">", ">>"]):
+            await update.message.reply_text("⛔ Security Violation: Direct filesystem modification of the Obsidian Vault is prohibited.")
+            return
     try:
         output = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT, text=True)
         await update.message.reply_text(f"```\n{output[:4000] or 'Success'}\n```", parse_mode="Markdown")
@@ -411,7 +517,31 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     intent = classify_intent(text)
 
-    if intent == "EXCEL":
+    if intent == "COMMAND_SAFETY_REFUSAL":
+        await reply_text_and_voice(update, COMMAND_SAFETY_REFUSAL, reply_as_voice=reply_as_voice)
+        return
+
+    elif intent == "VAULT":
+        ensure_gateway_running()
+        status_msg = await update.message.reply_text("🔍 Obsidian ভল্টে খোঁজা হচ্ছে ও লোকাল AI ভাবছে... 🧠")
+        try:
+            user_id = update.effective_user.id if update.effective_user else ALLOWED_USER_ID
+            res = requests.post(
+                GATEWAY_URL,
+                json={"query": text, "telegram_user_id": user_id},
+                timeout=120
+            )
+            if res.status_code == 200:
+                data = res.json()
+                answer = data.get("answer", "I couldn't find enough information in the Obsidian vault.")
+                await reply_text_and_voice(update, answer, reply_as_voice=reply_as_voice)
+            else:
+                await reply_text_and_voice(update, f"⚠️ ভল্ট গেটওয়ে ত্রুটি (HTTP {res.status_code})", reply_as_voice=reply_as_voice)
+        except Exception as e:
+            await reply_text_and_voice(update, f"⚠️ ভল্ট গেটওয়ে কানেকশন ত্রুটি: {e}", reply_as_voice=reply_as_voice)
+        return
+
+    elif intent == "EXCEL":
         await update.message.reply_text("📊 Antigravity এক্সেল বানাচ্ছে...")
         success, filepath, error = run_excel_exe(text)
         if success:
@@ -616,10 +746,13 @@ if __name__ == '__main__':
         print("❌ ERROR: BOT_TOKEN is missing! Please configure BOT_TOKEN in your .env file.")
         exit(1)
     ensure_ollama_running()
+    ensure_gateway_running()
     custom_request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0, write_timeout=30.0, pool_timeout=30.0)
     app = ApplicationBuilder().token(BOT_TOKEN).request(custom_request).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("vault", vault_cmd))
+    app.add_handler(CommandHandler("vault_stats", vault_stats_cmd))
     app.add_handler(CommandHandler("cmd", run_cmd))
     app.add_handler(CommandHandler("lock", lock_pc))
     app.add_handler(CommandHandler("cache", cache_cmd))
@@ -627,5 +760,5 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("হাইব্রিড রাউটার বট সফলভাবে চালু হয়েছে! 💻⚡")
+    print("হাইব্রিড রাউটার ও ভল্ট বট সফলভাবে চালু হয়েছে! 💻⚡")
     app.run_polling(bootstrap_retries=5)
