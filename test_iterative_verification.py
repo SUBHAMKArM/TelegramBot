@@ -44,6 +44,12 @@ class TestTemporalResolver(unittest.TestCase):
         res = self.resolver.resolve_temporal_expression("sombar ki routine?")
         self.assertIn("monday", [w.lower() for w in res["expanded_keywords"]])
 
+    def test_yesterday_resolution(self):
+        res = self.resolver.resolve_temporal_expression("Yesterday have college?")
+        self.assertIsNotNone(res["target_date"])
+        yesterday_weekday = (datetime.now() - timedelta(days=1)).strftime("%A").lower()
+        self.assertIn(yesterday_weekday, [w.lower() for w in res["expanded_keywords"]])
+
     def test_non_temporal_query(self):
         res = self.resolver.resolve_temporal_expression("What is RAG in machine learning?")
         self.assertIsNone(res["target_date"])
@@ -183,6 +189,23 @@ class TestGatewayEndpoints(unittest.TestCase):
         data = res.json()
         self.assertIn("total_queries", data)
         self.assertIn("positive_feedback", data)
+
+
+class TestIntentClassificationAndFollowUp(unittest.TestCase):
+    def test_banglish_college_and_semester_queries(self):
+        from bot_server import classify_intent
+        self.assertEqual(classify_intent("Kal ke college ache?"), "VAULT")
+        self.assertEqual(classify_intent("Semister e check koro"), "VAULT")
+        self.assertEqual(classify_intent("Yesterday have college?"), "VAULT")
+        self.assertEqual(classify_intent("BCA class routine"), "VAULT")
+
+    def test_multiturn_recheck_and_followup(self):
+        from bot_server import classify_intent
+        context_data = {"last_intent": "VAULT", "last_vault_query": {"query": "college routine"}}
+        self.assertEqual(classify_intent("Re check", context_data), "VAULT")
+        self.assertEqual(classify_intent("Haa", context_data), "VAULT")
+        self.assertEqual(classify_intent("E", context_data), "VAULT")
+        self.assertEqual(classify_intent("Abar dekho", context_data), "VAULT")
 
 
 if __name__ == "__main__":

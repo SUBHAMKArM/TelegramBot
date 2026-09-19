@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "last_updated": 1789764532.9063382,
+  "last_updated": 1789789389.449572,
   "query_mappings": {
     "rag": {
       "query_sample": "What is RAG?",
@@ -20,7 +20,7 @@
         "AI/Test.md"
       ],
       "hits": 1,
-      "positive_feedback": 4,
+      "positive_feedback": 6,
       "negative_feedback": 0,
       "avg_iterations": 1
     },
@@ -31,7 +31,7 @@
         "Vector Database.md",
         "Embeddings.md"
       ],
-      "hits": 4,
+      "hits": 6,
       "positive_feedback": 0,
       "negative_feedback": 0,
       "avg_iterations": 1
@@ -66,10 +66,10 @@
     }
   },
   "source_boosts": {
-    "RAG.md": 7,
-    "Vector Database.md": 7,
-    "Embeddings.md": 7,
-    "AI/Test.md": 8,
+    "RAG.md": 9,
+    "Vector Database.md": 9,
+    "Embeddings.md": 9,
+    "AI/Test.md": 12,
     "Deep Learning.md": 1,
     "Machine Learning.md": 1,
     "Artificial intelligence.md": 1

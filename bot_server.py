@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import json
 import datetime
 import subprocess
@@ -258,12 +259,23 @@ def query_ollama(prompt: str, model: str = FAST_LOCAL_MODEL, timeout: int = 60):
         print(f"❌ Ollama Error ({model}): {e}") 
         return None
 
-def classify_intent(text: str) -> str:
+def classify_intent(text: str, context_user_data: dict = None) -> str:
     lower = text.lower().strip()
 
     # 0. COMMAND SAFETY CHECK (Strict Read-Only Refusal)
     if is_destructive_command(text):
         return "COMMAND_SAFETY_REFUSAL"
+
+    # Contextual Follow-up checks (if previous turn was VAULT)
+    if context_user_data and context_user_data.get("last_intent") == "VAULT":
+        followup_keywords = [
+            "recheck", "re check", "re-check", "check again", "again", "abar", "abar dekho",
+            "abar check koro", "vul", "bhul", "ভুল", "thik na", "wrong", "not this", "eita na",
+            "haa", "ha", "yes", "ok", "acha", "achha", "e", "sem", "semester", "semister",
+            "check koro", "check", "dekho", "kothay", "kokhon", "when", "where", "room", "teacher"
+        ]
+        if any(re.search(rf"\b{re.escape(k)}\b", lower) or k == lower for k in followup_keywords):
+            return "VAULT"
 
     # 1. TIME / DATE Keywords (instant check)
     time_keywords = [
@@ -271,7 +283,7 @@ def classify_intent(text: str) -> str:
         "clock", "date", "tarikh", "তারিখ", "আজ কি বার", "আজকে কি বার", "what time",
         "কয়টা বাজল", "কটা বাজল"
     ]
-    if any(k in lower for k in time_keywords):
+    if any(k in lower for k in time_keywords) and not any(w in lower for w in ["class", "college", "routine", "exam", "lab"]):
         return "TIME"
 
     # 2. WEATHER Keywords (instant check)
@@ -291,14 +303,27 @@ def classify_intent(text: str) -> str:
     if any(k in lower for k in excel_keywords):
         return "EXCEL"
 
-    # 4. OBSIDIAN VAULT / COLLEGE / SECOND BRAIN / AI KNOWLEDGE (instant check)
+    # 4. OBSIDIAN VAULT / COLLEGE / SECOND BRAIN / AI KNOWLEDGE (comprehensive check)
     vault_keywords = [
+        # Vault & notes
         "vault", "obsidian", "ভল্ট", "নোট", "নোটস", "notes", "note", "second brain",
-        "timetable", "routine", "ক্লাস", "রুটিন", "টিচার", "মাস্টার", "কলেজ", "পরীক্ষা", "exam",
-        "syllabus", "room 401", "316p", "316q", "srb", "rjr", "ans", "sdm", "nrp", "spm",
-        "mrb", "dms", "brd", "bca", "narula", "nit bca", "attendance project",
+        # College, Semester, Class, Routine, Schedule, Faculty, Rooms
+        "college", "university", "campus", "semester", "semister", "sem", "1st sem", "2nd sem", "3rd sem", "4th sem",
+        "routine", "timetable", "time table", "schedule", "class", "classes", "period", "periods", "lecture", "lectures",
+        "lab", "labs", "practical", "theory", "room 401", "316p", "316q", "room", "rooms", "faculty", "teacher", "teachers",
+        "prof", "professor", "sir", "madam", "ma'am", "srb", "rjr", "ans", "sdm", "nrp", "spm", "mrb", "dms", "brd", "bca",
+        "narula", "nit bca", "attendance", "attendance project", "department", "dept",
+        # Bengali academic terms
+        "ক্লাস", "ক্লাসেস", "রুটিন", "টাইমটেবিল", "টিচার", "মাস্টার", "কলেজ", "পরীক্ষা", "exam", "exams", "test", "syllabus",
+        "সিলেবাস", "পড়া", "পড়াশোনা", "রুম",
+        # Relative date + presence queries
+        "kal ke", "kalke", "kal", "aaj", "aajke", "aj", "ajke", "gotokal", "yesterday", "tomorrow", "today",
+        "sombar", "mongolbar", "budhbar", "brihospotibar", "sukrobar", "sonibar", "robibar",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "ache", "achhe", "hobe", "chilo", "off", "holiday", "ছুটি",
+        # AI Knowledge & Technical
         "rag", "retrieval", "vector database", "embeddings", "neural network",
-        "transformers", "deep learning", "machine learning", "artificial intelligence"
+        "transformers", "deep learning", "machine learning", "artificial intelligence", "llm", "prompt", "python"
     ]
     if any(k in lower for k in vault_keywords):
         return "VAULT"
@@ -306,12 +331,12 @@ def classify_intent(text: str) -> str:
     # 5. Fallback: LLM Classification for complex queries
     classifier_prompt = (
         "Classify the following user message into exactly ONE category: VAULT, EXCEL, WEATHER, TIME, COMPLEX, or CHAT.\n"
-        "- VAULT: user asks about personal notes, Obsidian vault, college timetable, college classes, teachers, syllabus, or AI concepts.\n"
-        "- EXCEL: user asks to make spreadsheet, excel, doc, table, or tracker.\n"
-        "- WEATHER: user asks about weather, rain, temperature, climate.\n"
-        "- TIME: user asks what time it is or what date it is.\n"
-        "- COMPLEX: advanced general coding, logic, architecture.\n"
-        "- CHAT: greetings, casual talk, simple short questions.\n"
+        "- VAULT: questions about college, timetable, classes, routine, yesterday/today/tomorrow schedules, subjects, professors, exams, personal notes, Obsidian vault, AI or coding concepts.\n"
+        "- EXCEL: user asks to create spreadsheet or excel file.\n"
+        "- WEATHER: user asks about weather, rain, forecast.\n"
+        "- TIME: user asks current clock time or date.\n"
+        "- COMPLEX: advanced architecture or coding logic.\n"
+        "- CHAT: greetings (hi, hello), general chitchat.\n"
         f"Message: \"{text}\"\nOutput category ONLY:"
     )
     res = query_ollama(classifier_prompt, model=FAST_LOCAL_MODEL, timeout=10)
@@ -535,20 +560,38 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await reply_text_and_voice(update, f"💾 [Cached Result]\n{cached}", reply_as_voice=reply_as_voice)
         return
 
-    intent = classify_intent(text)
+    intent = classify_intent(text, context.user_data)
 
     if intent == "COMMAND_SAFETY_REFUSAL":
         await reply_text_and_voice(update, COMMAND_SAFETY_REFUSAL, reply_as_voice=reply_as_voice)
         return
 
     elif intent == "VAULT":
+        context.user_data["last_intent"] = "VAULT"
         ensure_gateway_running()
-        status_msg = await update.message.reply_text("🔍 Obsidian ভল্টে খোঁজা হচ্ছে ও লোকাল AI যাচাই করছে... 🧠")
+
+        query_to_send = text
+        last_vq = context.user_data.get("last_vault_query", {})
+        last_query_text = last_vq.get("query", "")
+
+        recheck_tokens = ["recheck", "re check", "re-check", "check again", "again", "abar dekho", "abar check koro", "vul", "bhul", "ভুল"]
+        is_recheck = any(tok in text.lower() for tok in recheck_tokens)
+
+        if is_recheck and last_query_text:
+            query_to_send = f"{last_query_text} (re-verify, expand search)"
+            status_msg = await update.message.reply_text("🔄 Obsidian ভল্টে গভীরভাবে পুনঃঅনুসন্ধান ও যাচাই করা হচ্ছে... 🧠")
+        elif last_query_text and len(text.split()) <= 4 and text.lower() not in last_query_text.lower():
+            # Short follow-up (e.g. "Semister e check koro", "Room kothay?", "E", "Haa")
+            query_to_send = f"{last_query_text} {text}"
+            status_msg = await update.message.reply_text(f"🔍 '{query_to_send}' প্রসঙ্গে ভল্টে খোঁজা হচ্ছে... 🧠")
+        else:
+            status_msg = await update.message.reply_text("🔍 Obsidian ভল্টে খোঁজা হচ্ছে ও লোকাল AI যাচাই করছে... 🧠")
+
         try:
             user_id = update.effective_user.id if update.effective_user else ALLOWED_USER_ID
             res = requests.post(
                 GATEWAY_URL,
-                json={"query": text, "telegram_user_id": user_id},
+                json={"query": query_to_send, "telegram_user_id": user_id},
                 timeout=120
             )
             try:
@@ -565,8 +608,9 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 keyboard = None
                 if not data.get("refused") and data.get("has_context"):
                     context.user_data["last_vault_query"] = {
-                        "query": text,
-                        "sources": sources
+                        "query": query_to_send,
+                        "sources": sources,
+                        "answer": answer
                     }
                     keyboard = InlineKeyboardMarkup([[
                         InlineKeyboardButton("👍 সঠিক", callback_data="fb_pos"),
@@ -590,6 +634,7 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     elif intent == "EXCEL":
+        context.user_data["last_intent"] = "EXCEL"
         await update.message.reply_text("📊 Antigravity এক্সেল বানাচ্ছে...")
         success, filepath, error = run_excel_exe(text)
         if success:
@@ -607,6 +652,7 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     elif intent == "TIME":
+        context.user_data["last_intent"] = "TIME"
         now = datetime.datetime.now()
         time_str = now.strftime("%I:%M %p")
         date_str = now.strftime("%d %B, %Y (%A)")
@@ -617,6 +663,7 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     elif intent == "WEATHER":
+        context.user_data["last_intent"] = "WEATHER"
         await update.message.reply_text("🌤️ আবহাওয়ার খবর দেখা হচ্ছে...")
         weather_res = fetch_weather_for_prompt(text)
         
@@ -656,6 +703,7 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     elif intent == "COMPLEX":
+        context.user_data["last_intent"] = "COMPLEX"
         if get_api_quota_status() and gemini_client:
             await update.message.reply_text("🌐 Gemini ভাবছে...")
             try:
@@ -678,11 +726,12 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     else:
         # General chat
+        context.user_data["last_intent"] = "CHAT"
         if get_api_quota_status() and gemini_client:
             try:
                 gemini_res = gemini_client.models.generate_content(
                     model='gemini-3.6-flash',
-                    contents=f"You are a helpful personal assistant bot on Telegram. Answer politely and concisely in the same language as user.\nUser: {text}"
+                    contents=f"You are a helpful personal assistant bot on Telegram. Answer politely and concisely in the same language as user (Bengali, Banglish, or English).\nUser: {text}"
                 )
                 reply_text = gemini_res.text.strip()
                 increment_api_quota()
@@ -692,7 +741,15 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except Exception:
                 pass
 
-        reply = query_ollama(f"You are a helpful assistant. Reply concisely in user's language.\nUser: {text}\nAssistant:", model=FAST_LOCAL_MODEL, timeout=30)
+        reply = query_ollama(
+            f"You are a helpful personal assistant on Telegram for Subham.\n"
+            f"STRICT RULES:\n"
+            f"1. Always reply in English, Bengali, or Banglish (matching the user's language). NEVER output Chinese, Japanese, or any unrelated language.\n"
+            f"2. If the user asks about college classes, routine, timetable, exams, or personal notes, tell them politely: 'দয়া করে বিস্তারিত বলুন, আমি আপনার Obsidian Vault থেকে খুঁজে দেখছি।'\n"
+            f"User: {text}\nAssistant:",
+            model=FAST_LOCAL_MODEL,
+            timeout=30
+        )
         await reply_text_and_voice(update, reply if reply else "লোকাল এআই কানেক্ট করা যায়নি।", reply_as_voice=reply_as_voice)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -766,8 +823,40 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 print(f"Feedback error: {e}")
             await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text("⚠️ ফিডব্যাক রেকর্ড করা হয়েছে (ভুল/অসম্পূর্ণ)। পরবর্তী অনুসন্ধানে বিকল্প ও সম্পর্কিত নোট বিবেচনা করা হবে।")
-            context.user_data.pop("last_vault_query", None)
+            status_recheck = await query.message.reply_text("⚠️ ফিডব্যাক রেকর্ড করা হয়েছে (ভুল/অসম্পূর্ণ)। বিকল্প সূত্র দিয়ে পুনরায় গভীর অনুসন্ধান ও যাচাই করা হচ্ছে... ⏳")
+
+            # Active Re-Search Loop on Negative Feedback!
+            try:
+                recheck_query = f"{last_q['query']} alternative search"
+                user_id = query.from_user.id
+                res = requests.post(
+                    GATEWAY_URL,
+                    json={"query": recheck_query, "telegram_user_id": user_id},
+                    timeout=120
+                )
+                try:
+                    await status_recheck.delete()
+                except Exception:
+                    pass
+                if res.status_code == 200:
+                    data = res.json()
+                    new_answer = data.get("answer", "")
+                    new_sources = data.get("sources", [])
+                    new_kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("👍 সঠিক", callback_data="fb_pos"),
+                        InlineKeyboardButton("👎 এখনও অসম্পূর্ণ", callback_data="fb_neg")
+                    ]])
+                    context.user_data["last_vault_query"] = {
+                        "query": last_q["query"],
+                        "sources": new_sources
+                    }
+                    await query.message.reply_text(f"🔄 **[পুনরায় অনুসন্ধানকৃত ফলাফল]:**\n\n{new_answer}", reply_markup=new_kb)
+                else:
+                    await query.message.reply_text(f"⚠️ ভল্ট গেটওয়ে ত্রুটি (HTTP {res.status_code})")
+            except Exception as e:
+                try: await status_recheck.delete()
+                except Exception: pass
+                await query.message.reply_text(f"⚠️ পুনঃঅনুসন্ধান ত্রুটি: {e}")
         else:
             await query.edit_message_reply_markup(reply_markup=None)
 
